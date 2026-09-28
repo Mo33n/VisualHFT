@@ -71,7 +71,6 @@ namespace VisualHFT.Studies
         private long _orderEvents = 0;
         private long _tradeCount = 0;
         private object _lock = new object();
-        private decimal _lastMarketMidPrice = 0; //keep track of market price
 
         private long _prevAdded = 0;
         private long _prevDeleted = 0;
@@ -87,9 +86,9 @@ namespace VisualHFT.Studies
         // Volume form only. Size posted, withdrawn and executed over the current interval.
         private readonly VolumeIntervalAccumulator _volumes = new VolumeIntervalAccumulator();
 
-        // Volume form only. The mid price is written by the order-book callback and read by the
-        // trade callback, which run concurrently, and a decimal cannot be assigned atomically —
-        // so it travels as the bit pattern of a double through Interlocked.
+        // Both forms. The mid price is written by the order-book callback and read whenever a
+        // value is published, which can happen on another thread, and a decimal cannot be
+        // assigned atomically — so it travels as the bit pattern of a double through Interlocked.
         private long _lastMidPriceBits;
 
         // Event declaration
@@ -201,6 +200,9 @@ namespace VisualHFT.Studies
             // settings are saved would show the new name over old data until the run turned over.
             ApplyPresentationForSelectedForm();
 
+            // A restart reuses this instance, possibly for another symbol: forget the old mid.
+            Interlocked.Exchange(ref _lastMidPriceBits, 0);
+
             if (_useVolumeForm)
             {
                 // The volume form reads size straight off the book and the public trade prints.
@@ -267,10 +269,13 @@ namespace VisualHFT.Studies
             if (!IsForThisStream(e.ProviderID, e.Symbol))
                 return;
 
+            // Every book carries the mid the chart plots, whichever counters the ratio is built
+            // from, so it is recorded before the form and the data mode split the work.
+            Interlocked.Exchange(ref _lastMidPriceBits, BitConverter.DoubleToInt64Bits(e.MidPrice));
+
             if (_useVolumeForm)
             {
                 var volumes = e.GetCountersVolume();
-                Interlocked.Exchange(ref _lastMidPriceBits, BitConverter.DoubleToInt64Bits(e.MidPrice));
                 _volumes.OnOrderBookCounters(volumes.addedVol, volumes.deletedVol, e.SizeDecimalPlaces,
                     HelperTimeProvider.Now);
                 DoCalculationAndSend();
@@ -309,7 +314,6 @@ namespace VisualHFT.Studies
                 _prevDeleted = counters.deleted;
                 _prevUpdated = counters.updated;
 
-                _lastMarketMidPrice = (decimal)e.MidPrice;
                 Interlocked.Add(ref _orderEvents, addedDelta + deletedDelta + 2 * updatedDelta); // Accumulate deltas, double-count updates
                 DoCalculationAndSend();
             }
@@ -353,7 +357,7 @@ namespace VisualHFT.Studies
             var newItem = new BaseStudyModel();
             newItem.Value = orderToTradeRatio;
             newItem.Format = ValueFormat;
-            newItem.MarketMidPrice = _lastMarketMidPrice;
+            newItem.MarketMidPrice = (decimal)BitConverter.Int64BitsToDouble(Interlocked.Read(ref _lastMidPriceBits));
             newItem.Timestamp = HelperTimeProvider.Now;
 
             AddCalculation(newItem);
