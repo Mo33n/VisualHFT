@@ -237,7 +237,7 @@ namespace VisualHFT.Studies
                     HelperOrderBook.Instance.Unsubscribe(LIMITORDERBOOK_OnDataReceived);
                     HelperTrade.Instance.Unsubscribe(TRADE_OnDataReceived);
 
-                    mrCalc.Dispose();
+                    mrCalc?.Dispose();
                 }
 
                 base.Dispose(disposing);
