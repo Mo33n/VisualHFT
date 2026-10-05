@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  An open-source desktop application for real-time market microstructure analysis.
+  <b>VisualHFT Terminal</b> — The observability and decision terminal for quantitative and electronic trading desks.
 </p>
 
 <p align="center">
@@ -37,7 +37,7 @@
 
 ## What it does
 
-VisualHFT brings live order books and trades from supported venues into one desktop view. It helps traders, quants, and researchers examine depth, liquidity, order flow, and market resilience while conditions are changing.
+**VisualHFT Terminal** brings live order books and trades from supported venues into one desktop view. It helps traders, quants, and researchers examine depth, liquidity, order flow, and market resilience while conditions are changing.
 
 | Live order book | Built-in study |
 | --- | --- |

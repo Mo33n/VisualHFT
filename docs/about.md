@@ -1,6 +1,6 @@
 # About VisualHFT
 
-VisualHFT is built to make real-time market microstructure visible, explainable, and actionable.
+VisualHFT builds **VisualHFT Terminal** — the open-source observability and decision terminal for quantitative and electronic trading desks, making real-time market microstructure visible, explainable, and actionable.
 
 The project is informed by high-frequency trading experience dating to 2010. Its public edition focuses on a clear view of live order-book and trade behavior, plus an extension model for community-built connectors and studies.
 

@@ -1,6 +1,6 @@
 # Contributing to VisualHFT
 
-VisualHFT is built to make real-time market microstructure visible, explainable, and actionable. Contributions to code, documentation, connectors, and studies are welcome.
+VisualHFT builds **VisualHFT Terminal** — the open-source observability and decision terminal for quantitative and electronic trading desks. Contributions to code, documentation, connectors, and studies are welcome.
 
 ## Start here
 
