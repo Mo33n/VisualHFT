@@ -5,13 +5,13 @@
 
 ## What is This?
 
-The **Partner Quant Program** is VisualHFT’s equity-based contributor track — a way for deeply committed technical builders to earn long-term ownership in the platform.
+The **Partner Quant Program** is VisualHFT’s equity-based contributor track — a way for deeply committed technical builders to earn long-term ownership as we build **VisualHFT Terminal** into the default observability and decision terminal for electronic trading.
 
 This is not a bounty board.  
 This is not a freelance gig.  
 This is **early-stage technical co-creation** — in exchange for real equity.
 
-We're assembling a small group of contributor-partners who will help us ship the core product, own modules, and shape VisualHFT into the go-to visibility layer for market microstructure analytics.
+We're assembling a small group of contributor-partners who will help us ship the core terminal, own modular plugins, and shape VisualHFT Terminal into the go-to visibility and decision workbench for market microstructure analytics.
 
 ---
 
