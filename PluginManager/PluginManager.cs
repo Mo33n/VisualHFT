@@ -44,6 +44,87 @@ namespace VisualHFT.PluginManager
             }
         }
         public static List<IPlugin> AllPlugins { get { lock (_locker) return ALL_PLUGINS; } }
+
+        /// <summary>
+        /// Curated, flattened list of selectable study-metrics for any "pick a study"
+        /// surface. Single studies map to one descriptor; multi-study children map to one
+        /// each (grouped under the parent's title). Multi-study parents are never selectable
+        /// on their own. Non-study plugins (data retrievers, etc.) are excluded.
+        /// Read-only: building this list does not start or wire any plugin.
+        /// </summary>
+        public static IReadOnlyList<StudyDescriptor> GetSelectableStudies()
+        {
+            var result = new List<StudyDescriptor>();
+            lock (_locker)
+            {
+                foreach (var plugin in ALL_PLUGINS)
+                {
+                    // Multi-study parents are IPlugin + IMultiStudy (not IStudy): emit children only.
+                    if (plugin is IMultiStudy multi)
+                    {
+                        var parentId = plugin.GetPluginUniqueID();
+                        var settings = plugin.Settings;
+                        // Children share the parent's settings, so the config state (and its
+                        // reason) is computed once and applied to every child.
+                        var reason = settings is null ? "Plugin has no settings." : settings.GetConfigurationError();
+                        var children = multi.Studies;
+                        if (children == null)
+                            continue;
+                        foreach (var child in children)
+                        {
+                            if (child == null)
+                                continue;
+                            // Only metric-emitting children are matchable by a trigger rule.
+                            if (!child.EmitsMetric)
+                                continue;
+                            result.Add(new StudyDescriptor
+                            {
+                                // Key carries the metric identity (TileTitle), so children stay
+                                // distinct even if their plugin Name/Description collide.
+                                Id = $"{parentId}|{child.TileTitle}",
+                                DisplayName = child.TileTitle,
+                                GroupName = multi.TileTitle,
+                                // The CHILD's own tooltip (never the parent's) so pickers can
+                                // surface what this specific metric is.
+                                TileToolTip = child.TileToolTip ?? string.Empty,
+                                ProviderName = settings?.Provider?.ProviderName ?? string.Empty,
+                                Symbol = settings?.Symbol ?? string.Empty,
+                                // Config-gate only — deliberately NOT plugin.Status: StartAsync sets
+                                // STARTED unconditionally when lifecycle wiring finishes, configured or
+                                // not (config matching is self-guarded per-event inside the handlers),
+                                // so STARTED would rescue never-configured auto-started system plugins.
+                                // A study reconfigured live IS reflected here without any liveness
+                                // rescue, because GetConfigurationError keys on the same provider
+                                // identity the emit path matches (StudyConfigPolicy).
+                                IsConfigured = reason is null,
+                                UnavailableReason = reason
+                            });
+                        }
+                    }
+                    else if (plugin is IStudy study)
+                    {
+                        // Only metric-emitting studies are matchable by a trigger rule.
+                        if (!study.EmitsMetric)
+                            continue;
+                        var settings = plugin.Settings;
+                        var reason = settings is null ? "Plugin has no settings." : settings.GetConfigurationError();
+                        result.Add(new StudyDescriptor
+                        {
+                            Id = plugin.GetPluginUniqueID(),
+                            DisplayName = study.TileTitle,
+                            GroupName = null,
+                            TileToolTip = study.TileToolTip ?? string.Empty,
+                            ProviderName = settings?.Provider?.ProviderName ?? string.Empty,
+                            Symbol = settings?.Symbol ?? string.Empty,
+                            // Config-gate only — NOT plugin.Status (see multi-study branch above).
+                            IsConfigured = reason is null,
+                            UnavailableReason = reason
+                        });
+                    }
+                }
+            }
+            return result;
+        }
         public static async Task StartPluginsAsync()
         {
             List<Task> startTasks = new List<Task>();

@@ -19,7 +19,6 @@ namespace VisualHFT.Studies
 
     public class MarketResilienceBiasStudy : BasePluginStudy
     {
-        private bool _disposed = false; // to track whether the object has been disposed
         private PlugInSettings _settings;
         private MarketResilienceWithBias _mrBiasCalc;
         private HelperCustomQueue<OrderBookSnapshot> _QUEUE;
@@ -27,8 +26,17 @@ namespace VisualHFT.Studies
         // Event declaration
         public override event EventHandler<decimal> OnAlertTriggered;
 
+        // Emits a metric via AddCalculation -> the trigger picker lists this study (IStudy.EmitsMetric).
+        public override bool EmitsMetric => true;
+
         public override string Name { get; set; } = "Market Resilience Bias";
         public override string Version { get; set; } = "1.0.0";
+        // 🛑 DO NOT EDIT THIS STRING. GetPluginUniqueID() hashes Name + Author + Version +
+        // Description + assembly name, and that hash is the key under which this tile's settings
+        // are saved and loaded. Changing a single character orphans every existing user's symbol
+        // and provider selection: the tile reloads with an empty configuration and goes dead.
+        // It also unhooks any alert rule registered against this study.
+        // Corrected, user-facing wording lives in TileToolTip below, which is not hashed.
         public override string Description { get; set; } = "Analyzes directional market sentiment after large trades by monitoring volume addition rates on bid/ask sides. Provides real-time bias scoring (+1 bullish, -1 bearish, 0 neutral) for sentiment analysis.";
         public override string Author { get; set; } = "VisualHFT";
         public override ISetting Settings { get => _settings; set => _settings = (PlugInSettings)value; }
@@ -39,22 +47,22 @@ namespace VisualHFT.Studies
 
             "<b>How It Works:</b><br/>" +
             "1. <b>Detection:</b> Identifies large trades (≥2σ above average) that cause order book depth depletion<br/>" +
-            "2. <b>Recovery Tracking:</b> Monitors which side of the book (bid/ask) recovers first using immediacy-weighted depth<br/>" +
-            "3. <b>Bias Classification:</b> Determines market sentiment based on recovery patterns<br/><br/>" +
+            "2. <b>Recovery Tracking:</b> Watches whether each depleted side regains 90% of its immediacy-weighted depth before the window closes, AND comes back at its price — within one typical spread of where it was quoted just before the depletion. Only the side that was depleted counts; the other side growing is a price move, not a recovery<br/>" +
+            "3. <b>Bias Classification:</b> Reads direction from the side that FAILED to come back<br/><br/>" +
 
             "<b>Signal Interpretation:</b><br/>" +
-            "• <b>↑ Bullish (+1):</b> Ask side depleted → Bid side recovered (buyers in control)<br/>" +
-            "• <b>↓ Bearish (-1):</b> Bid side depleted → Ask side recovered (sellers in control)<br/>" +
-            "• <b>— Neutral (0):</b> Same-side recovery or insufficient Market Resilience (MR > 0.30)<br/><br/>" +
+            "• <b>↑ Bullish (+1):</b> The depleted ask failed to redeploy — sellers could not re-offer<br/>" +
+            "• <b>↓ Bearish (-1):</b> The depleted bid failed to redeploy — buyers could not re-bid<br/>" +
+            "• <b>— Neutral (0):</b> The depleted side came back at its price, or came back at a BETTER price, or both sides failed together<br/><br/>" +
 
             "<b>Activation Requirements:</b><br/>" +
-            "• Large trade detected (≥2σ threshold)<br/>" +
-            "• Depth depletion confirmed (≥3σ drop in immediacy-weighted depth)<br/>" +
+            "• Large trade detected (more than 2 dispersions above the recent size mean)<br/>" +
+            "• Depth depletion confirmed (3 median absolute deviations below the usual immediacy-weighted depth)<br/>" +
             "• Market Resilience (MR) score ≤ 0.30 (poor resilience)<br/>" +
-            "• Recovery completes within timeout window (default: 5 seconds)<br/><br/>" +
+            "• A depleted side still short of 90% of its depth — or back in size but not back at its price — when the timeout window closes (default: 5 seconds)<br/><br/>" +
 
             "<b>Hysteresis Behavior:</b><br/>" +
-            "MRB activates when MR ≤ 0.30 and deactivates when MR ≥ 0.50, preventing signal oscillation during moderate resilience.<br/><br/>" +
+            "MRB activates when MR ≤ 0.30 and deactivates when MR ≥ 0.50, preventing signal oscillation during moderate resilience. Between those levels the arrow keeps whatever it was last showing: while it is inactive it publishes nothing rather than resetting to Neutral, so a reading persists until resilience recovers to 0.50 or a new event replaces it.<br/><br/>" +
 
             "<b>Practical Use:</b><br/>" +
             "Use MRB to identify which side (buyers/sellers) gains control after market shocks. Persistent directional bias may indicate institutional order flow or liquidity imbalances.";
@@ -124,15 +132,27 @@ namespace VisualHFT.Studies
         }
         private void TRADE_OnDataReceived(Trade e)
         {
+            if (e == null)
+                return;
+            if (_settings.Provider.ProviderID != e.ProviderId || _settings.Symbol != e.Symbol)
+                return;
+
             _mrBiasCalc.OnTrade(e);
             DoCalculationAndSend();
         }
         private void QUEUE_onRead(OrderBookSnapshot e)
         {
-            _mrBiasCalc.OnOrderBookUpdate(e);
-            DoCalculationAndSend();
-            // ✅ CHANGED: Dispose snapshot to return arrays to pool
-            e.Dispose();
+            try
+            {
+                _mrBiasCalc.OnOrderBookUpdate(e);
+                DoCalculationAndSend();
+            }
+            finally
+            {
+                // The calculator keeps no reference to this snapshot, so the pooled arrays are
+                // returned here, on every path.
+                e.Dispose();
+            }
         }
         private void QUEUE_onError(Exception ex)
         {
@@ -183,16 +203,17 @@ namespace VisualHFT.Studies
         {
             if (Status != VisualHFT.PluginManager.ePluginStatus.STARTED) return;
 
-            eMarketBias _valueBias = _mrBiasCalc.CurrentMarketBias;
-            string _valueColor = _valueBias == eMarketBias.Bullish ? "Green"
-                               : (_valueBias == eMarketBias.Bearish ? "Red" : "White");
+            // Thread-safe read: snapshot all output values under lock
+            var (_, valueBias, midPrice) = _mrBiasCalc.GetOutputSnapshot();
+            string valueColor = valueBias == eMarketBias.Bullish ? "Green"
+                               : (valueBias == eMarketBias.Bearish ? "Red" : "White");
 
             var newItem = new BaseStudyModel
             {
-                Value = _valueBias == eMarketBias.Bullish ? 1 : (_valueBias == eMarketBias.Bearish ? -1 : 0),
-                CustomFormatter = BiasFormatter,  // ✅ Use CustomFormatter instead
-                ValueColor = _valueColor,
-                MarketMidPrice = _mrBiasCalc.MidMarketPrice,
+                Value = valueBias == eMarketBias.Bullish ? 1 : (valueBias == eMarketBias.Bearish ? -1 : 0),
+                CustomFormatter = BiasFormatter,
+                ValueColor = valueColor,
+                MarketMidPrice = midPrice,
                 Timestamp = HelperTimeProvider.Now
             };
 
@@ -200,7 +221,7 @@ namespace VisualHFT.Studies
         }
 
 
-        protected virtual void Dispose(bool disposing)
+        protected override void Dispose(bool disposing)
         {
             if (!_disposed)
             {
@@ -208,15 +229,16 @@ namespace VisualHFT.Studies
 
                 if (disposing)
                 {
+                    // Stop queue FIRST to prevent new items arriving after disposal
+                    _QUEUE.Dispose();
+
                     HelperOrderBook.Instance.Unsubscribe(LIMITORDERBOOK_OnDataReceived);
                     HelperTrade.Instance.Unsubscribe(TRADE_OnDataReceived);
-                    _QUEUE.Dispose();
-                    _mrBiasCalc.Dispose();
-                    // ❌ REMOVED: OrderBookSnapshotPool no longer exists
-                    // OrderBookSnapshotPool.Instance.Dispose();
-                    base.Dispose();
+
+                    _mrBiasCalc?.Dispose();
                 }
 
+                base.Dispose(disposing);
             }
         }
         protected override void LoadSettings()

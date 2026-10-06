@@ -15,7 +15,11 @@ namespace VisualHFT.Commons.Helpers
     {
         ERROR,
         WARNING,
-        TRIGGER_ACTION
+        TRIGGER_ACTION,
+        // Informational tier (below WARNING) for normal, expected outcomes that
+        // should be surfaced but are not problems. Appended last so
+        // existing ordinals (ERROR=0/WARNING=1/TRIGGER_ACTION=2) are unchanged.
+        INFO
     }
 
     public class HelperNotificationManager
@@ -38,7 +42,7 @@ namespace VisualHFT.Commons.Helpers
         public event EventHandler<ErrorNotificationEventArgs> NotificationAdded;
 
         public void AddNotification(string title, string message, HelprNorificationManagerTypes notificationType,
-            HelprNorificationManagerCategories category = HelprNorificationManagerCategories.NONE, Exception exception = null, string PluginID=null)
+            HelprNorificationManagerCategories category = HelprNorificationManagerCategories.NONE, Exception exception = null, string PluginID = null)
         {
             var notification = new ErrorNotification
             {
@@ -50,7 +54,7 @@ namespace VisualHFT.Commons.Helpers
                 IsRead = false,
                 Category = category,
                 NotificationType = notificationType,
-                PluginID=PluginID
+                PluginID = PluginID
             };
             lock (_lock)
             {
@@ -69,7 +73,7 @@ namespace VisualHFT.Commons.Helpers
             lock (_lock)
                 return _notifications;
         }
-        
+
 
         public void MarkAsRead(int id)
         {
