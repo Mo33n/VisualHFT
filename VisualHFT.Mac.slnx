@@ -20,5 +20,8 @@
     <Project Path="VisualHFT.Plugins/MarketConnectors.Gemini/MarketConnectors.Gemini/MarketConnectors.Gemini.csproj" />
   </Folder>
   <Project Path="VisualHFT.Commons/VisualHFT.Commons.csproj" />
+  <Project Path="VisualHFT.Runtime/VisualHFT.Runtime.csproj" />
   <Project Path="VisualHFT.Desktop/VisualHFT.Desktop.csproj" />
+  <Project Path="tests/Unit/VisualHFT.Runtime.Tests/VisualHFT.Runtime.Tests.csproj" />
+  <Project Path="tests/Unit/VisualHFT.Desktop.Tests/VisualHFT.Desktop.Tests.csproj" />
 </Solution>

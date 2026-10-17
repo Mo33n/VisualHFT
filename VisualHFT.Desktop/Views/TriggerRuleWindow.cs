@@ -6,6 +6,7 @@ using Avalonia.Media;
 using VisualHFT.Desktop.Hosting;
 using VisualHFT.Desktop.Screens;
 using VisualHFT.PluginManager;
+using HostPlugins = VisualHFT.PluginManager.PluginManager;
 using VisualHFT.TriggerEngine;
 
 namespace VisualHFT.Desktop.Views;
@@ -30,7 +31,7 @@ public sealed class TriggerRuleWindow : Window
 
     public TriggerRuleWindow(TriggerRule? existing = null)
     {
-        _studies = DesktopPluginManager.GetSelectableStudies().ToList();
+        _studies = HostPlugins.GetSelectableStudies().ToList();
         _draft = existing == null ? new TriggerDraft() : TriggerDraft.FromRule(existing);
         if (_draft.Conditions.Count == 0)
             _draft.Conditions.Add(new ConditionDraft());

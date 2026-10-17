@@ -11,6 +11,7 @@ using VisualHFT.Enums;
 using VisualHFT.Helpers;
 using VisualHFT.Model;
 using VisualHFT.PluginManager;
+using HostPlugins = VisualHFT.PluginManager.PluginManager;
 using VisualHFT.TriggerEngine;
 using VisualHFT.UserSettings;
 
@@ -21,7 +22,8 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
     private const int LadderDepth = 24;
     private readonly DispatcherTimer _timer;
     private readonly object _gate = new();
-    private readonly Dictionary<string, BookSnapshot> _books = new();
+    private readonly MarketIngress _ingress = new();
+    private IReadOnlyList<TradePrint> _visibleTrades = Array.Empty<TradePrint>();
     private readonly Dictionary<string, List<double>> _midHistory = new();
     private readonly Dictionary<string, PositionRow> _positions = new();
     private readonly FlowTracker _flow = new();
@@ -30,7 +32,6 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
     private readonly Dictionary<string, DateTime> _midStamp = new();
     private readonly List<OrderSnap> _orders = new();
     private AggregationLevel _aggregation = AggregationLevel.Ms100;
-    private readonly List<TradePrint> _trades = new();
     private readonly List<double> _equity = new();
     private readonly Dictionary<string, PositionSnap> _positionSnaps = new();
     private SettingsNode? _settingsRoot;
@@ -212,6 +213,7 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
         {
             if (!Set(ref _selectedProvider, value))
                 return;
+            _ingress.SetProviderFilter(value);
             _flow.Clear();
             _prices.Clear();
             _spreads.Clear();
@@ -356,19 +358,9 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
         HelperOrderBook.Instance.Subscribe(OnOrderBook);
         HelperTrade.Instance.Subscribe(OnTrade);
         HelperPosition.Instance.Subscribe(OnPosition);
-        HelperProvider.Instance.OnDataReceived += (_, provider) => OnProvider(provider);
-        HelperProvider.Instance.OnStatusChanged += (_, provider) => OnProvider(provider);
-        HelperNotificationManager.Instance.NotificationAdded += (_, args) =>
-        {
-            var row = NotificationRow.From(args.Notification);
-            Dispatcher.UIThread.Post(() =>
-            {
-                Notifications.Insert(0, row);
-                while (Notifications.Count > 80)
-                    Notifications.RemoveAt(Notifications.Count - 1);
-                UnreadCount = Notifications.Count(item => !item.IsRead);
-            });
-        };
+        HelperProvider.Instance.OnDataReceived += OnProviderEvent;
+        HelperProvider.Instance.OnStatusChanged += OnProviderEvent;
+        HelperNotificationManager.Instance.NotificationAdded += OnNotificationEvent;
 
         _timer.Start();
         StatusText = "Loading plugins…";
@@ -376,37 +368,27 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
         TriggerEngineService.LoadAllRules();
         _ = TriggerEngineService.StartBackgroundWorkerAsync(CancellationToken.None);
 
-        await Task.Run(DesktopPluginManager.LoadPlugins);
+        await Task.Run(HostPlugins.LoadPlugins);
         BindTickerSearch();
         BindStudies();
         RefreshPlugins();
         RefreshRules();
         LoadSettingsTree();
-        StatusText = DesktopPluginManager.AllPlugins.Count.ToString(CultureInfo.InvariantCulture) + " plugins loaded. Connecting venues…";
+        StatusText = HostPlugins.AllPlugins.Count.ToString(CultureInfo.InvariantCulture) + " plugins loaded. Connecting venues…";
         _ = ConnectPluginsAsync();
-        _ = Task.Run(async () =>
-        {
-            while (!_disposed)
-            {
-                await Task.Delay(35000);
-                if (_disposed)
-                    break;
-                GC.Collect(0, GCCollectionMode.Forced, false);
-            }
-        });
     }
 
     private async Task ConnectPluginsAsync()
     {
         try
         {
-            foreach (var plugin in DesktopPluginManager.AllPlugins)
+            foreach (var plugin in HostPlugins.AllPlugins)
             {
                 if (plugin.PluginType == ePluginType.MARKET_CONNECTOR)
                     continue;
                 try
                 {
-                    await DesktopPluginManager.StartPluginAsync(plugin);
+                    await HostPlugins.StartPluginAsync(plugin);
                 }
                 catch (Exception ex)
                 {
@@ -432,8 +414,8 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
             BindStudies();
             RefreshPlugins();
             RefreshSessionChrome();
-            var running = DesktopPluginManager.AllPlugins.Count(p => p.Status == ePluginStatus.STARTED);
-            StatusText = DesktopPluginManager.AllPlugins.Count.ToString(CultureInfo.InvariantCulture)
+            var running = HostPlugins.AllPlugins.Count(p => p.Status == ePluginStatus.STARTED);
+            StatusText = HostPlugins.AllPlugins.Count.ToString(CultureInfo.InvariantCulture)
                 + " plugins loaded, "
                 + running.ToString(CultureInfo.InvariantCulture)
                 + " running";
@@ -443,7 +425,7 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
     public void RefreshPlugins()
     {
         var existing = Plugins.ToDictionary(p => p.Plugin);
-        foreach (var plugin in DesktopPluginManager.AllPlugins)
+        foreach (var plugin in HostPlugins.AllPlugins)
         {
             if (!existing.TryGetValue(plugin, out var row))
             {
@@ -481,11 +463,14 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
         HelperOrderBook.Instance.Unsubscribe(OnOrderBook);
         HelperTrade.Instance.Unsubscribe(OnTrade);
         HelperPosition.Instance.Unsubscribe(OnPosition);
+        HelperProvider.Instance.OnDataReceived -= OnProviderEvent;
+        HelperProvider.Instance.OnStatusChanged -= OnProviderEvent;
+        HelperNotificationManager.Instance.NotificationAdded -= OnNotificationEvent;
     }
 
     private void BindStudies()
     {
-        foreach (var plugin in DesktopPluginManager.AllPlugins)
+        foreach (var plugin in HostPlugins.AllPlugins)
         {
             if (plugin is IMultiStudy multi && multi.Studies != null)
             {
@@ -520,21 +505,18 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
         }
     }
 
-    private void OnOrderBook(OrderBook book)
-    {
-        if (book == null || string.IsNullOrEmpty(book.Symbol))
-            return;
+    private void OnOrderBook(OrderBook book) => _ingress.AddBook(book);
 
-        var snapshot = BookSnapshot.Capture(book);
-        if (!Matches(snapshot.Symbol, snapshot.Provider))
-            return;
-        lock (_gate)
-        {
-            _books.Clear();
-            _books[snapshot.Provider + "|" + snapshot.Symbol] = snapshot;
-            _dirty = true;
-        }
-    }
+    private void OnTrade(Trade trade) => _ingress.AddTrade(trade);
+
+    private void OnPosition(Position position, Order? _, Order? __) => _ingress.AddPosition(position);
+
+    private void OnProviderEvent(object? _, VisualHFT.Model.Provider? provider) => _ingress.AddProvider(provider);
+
+    private void OnNotificationEvent(object? _, ErrorNotificationEventArgs args) =>
+        _ingress.AddNotification(args?.Notification);
+
+    internal void MarkDirty() => _dirty = true;
 
     internal bool Matches(string symbol, string provider)
     {
@@ -551,6 +533,7 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
         _focusNative = row?.Native ?? "";
         _focusNormalized = row?.Normalized ?? "";
         _focusVenue = row?.Venue ?? "";
+        _ingress.SetFocus(_focusNative, _focusNormalized, _focusVenue);
     }
 
     internal WatchItemRow? FocusedWatch() => Watchlist.FirstOrDefault(row => row.IsFocused);
@@ -561,119 +544,123 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
         return focus == null ? "" : focus.Venue + "  " + focus.Native + "  " + focus.KindLabel;
     }
 
-    private void OnTrade(Trade trade)
+    private void ApplyNotifications(IReadOnlyList<NotificationUpdate> updates)
     {
-        if (trade == null)
+        if (updates.Count == 0)
             return;
-        if (!Matches(trade.Symbol ?? "", trade.ProviderName ?? ""))
-            return;
-        var brush = trade.IsBuy == false ? Brushes.IndianRed : Brushes.MediumSeaGreen;
-        lock (_gate)
+        foreach (var update in updates)
         {
-            _trades.Add(new TradePrint(trade.Symbol ?? "", trade.ProviderName ?? "", (double)trade.Price, (double)trade.Size, trade.IsBuy, trade.Timestamp));
-            if (_trades.Count > 2000)
-                _trades.RemoveAt(0);
-            _dirty = true;
+            Notifications.Insert(0, new NotificationRow
+            {
+                Id = update.Id,
+                Title = update.Title,
+                Message = update.Message,
+                When = update.Timestamp.ToString("HH:mm:ss", CultureInfo.InvariantCulture),
+                Timestamp = update.Timestamp,
+                Type = update.Type.ToString(),
+                Tone = Tone(update.Type),
+                IsRead = update.IsRead
+            });
         }
-        Dispatcher.UIThread.Post(() =>
-        {
-            var focus = FocusedWatch();
-            var name = focus == null
-                ? (trade.ProviderName ?? "") + " " + (trade.Symbol ?? "")
-                : focus.Venue + " " + focus.Native;
-            LastTradeText = name + "  " + trade.Price.ToString("0.########", CultureInfo.InvariantCulture)
-                + " × " + trade.Size.ToString("0.####", CultureInfo.InvariantCulture);
-            LastTradeBrush = brush;
-            PublishTape();
-        });
+        while (Notifications.Count > MarketIngress.MaxNotifications)
+            Notifications.RemoveAt(Notifications.Count - 1);
+        UnreadCount = Notifications.Count(item => !item.IsRead);
     }
 
-    private void OnPosition(Position position, Order? _, Order? __)
+    private static IBrush Tone(HelprNorificationManagerTypes type) => type switch
     {
-        if (position == null)
-            return;
-        var symbol = position.Symbol;
-        var orders = position.GetAllOrders(null).Select(CopyOrder).ToList();
-        var net = position.NetPosition;
-        var buy = position.TotBuy;
-        var sell = position.TotSell;
-        var exposure = position.Exposure;
-        var workingBuy = position.WrkBuy;
-        var workingSell = position.WrkSell;
-        var total = position.PLTot;
-        var realized = position.PLRealized;
-        var open = position.PLOpen;
-        var updated = position.LastUpdated;
-        Dispatcher.UIThread.Post(() =>
+        HelprNorificationManagerTypes.ERROR => Brushes.IndianRed,
+        HelprNorificationManagerTypes.WARNING => Brushes.Goldenrod,
+        HelprNorificationManagerTypes.TRIGGER_ACTION => Brushes.DeepSkyBlue,
+        _ => Brushes.LightGray
+    };
+
+    private void ApplyProviders(IReadOnlyList<ProviderUpdate> updates)
+    {
+        foreach (var update in updates)
         {
-            if (!Matches(symbol, SelectedProvider == "All" ? "" : SelectedProvider))
-                return;
-            if (!_positions.TryGetValue(symbol, out var row))
+            if (!Providers.Contains(update.Name))
+                Providers.Add(update.Name);
+            var row = Sessions.FirstOrDefault(session => session.Code == update.Code);
+            if (row == null)
+            {
+                row = new ProviderSessionRow(update.Code);
+                Sessions.Add(row);
+            }
+            row.Apply(update.Name, update.Status, update.Tooltip, update.Plugin);
+        }
+        if (updates.Count > 0)
+            RefreshSessionChrome();
+    }
+
+    private void ApplyPositions(IReadOnlyList<PositionUpdate> updates)
+    {
+        foreach (var update in updates)
+        {
+            if (!_positions.TryGetValue(update.Symbol, out var row))
             {
                 row = new PositionRow();
-                _positions[symbol] = row;
+                _positions[update.Symbol] = row;
                 Positions.Add(row);
             }
-            row.Symbol = symbol;
-            row.NetText = net.ToString("0.####", CultureInfo.InvariantCulture);
-            row.BuyText = buy.ToString("0.####", CultureInfo.InvariantCulture);
-            row.SellText = sell.ToString("0.####", CultureInfo.InvariantCulture);
-            row.ExposureText = exposure.ToString("0.####", CultureInfo.InvariantCulture);
-            row.WorkingBuyText = workingBuy.ToString("0.####", CultureInfo.InvariantCulture);
-            row.WorkingSellText = workingSell.ToString("0.####", CultureInfo.InvariantCulture);
-            row.TotalText = total.ToString("0.####", CultureInfo.InvariantCulture);
-            row.RealizedText = realized.ToString("0.####", CultureInfo.InvariantCulture);
-            row.OpenText = open.ToString("0.####", CultureInfo.InvariantCulture);
-            row.UpdatedText = updated.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
-            row.PlBrush = BrushFrom(BlotterPaint.PositionFill(total));
-            row.OpenBrush = BrushFrom(BlotterPaint.PositionFill(open));
-            _positionSnaps[symbol] = new PositionSnap(symbol, net, realized, open);
+            row.Symbol = update.Symbol;
+            row.NetText = update.Net.ToString("0.####", CultureInfo.InvariantCulture);
+            row.BuyText = update.Buy.ToString("0.####", CultureInfo.InvariantCulture);
+            row.SellText = update.Sell.ToString("0.####", CultureInfo.InvariantCulture);
+            row.ExposureText = update.Exposure.ToString("0.####", CultureInfo.InvariantCulture);
+            row.WorkingBuyText = update.WorkingBuy.ToString("0.####", CultureInfo.InvariantCulture);
+            row.WorkingSellText = update.WorkingSell.ToString("0.####", CultureInfo.InvariantCulture);
+            row.TotalText = update.Total.ToString("0.####", CultureInfo.InvariantCulture);
+            row.RealizedText = update.Realized.ToString("0.####", CultureInfo.InvariantCulture);
+            row.OpenText = update.Open.ToString("0.####", CultureInfo.InvariantCulture);
+            row.UpdatedText = update.Updated.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture);
+            row.PlBrush = BrushFrom(BlotterPaint.PositionFill(update.Total));
+            row.OpenBrush = BrushFrom(BlotterPaint.PositionFill(update.Open));
+            _positionSnaps[update.Symbol] = new PositionSnap(update.Symbol, update.Net, update.Realized, update.Open);
             _equity.Add(_positionSnaps.Values.Sum(p => p.Realized + p.Open));
             if (_equity.Count > 500)
                 _equity.RemoveAt(0);
-            _orders.RemoveAll(order => order.Symbol == symbol);
-            _orders.AddRange(orders);
+            _orders.RemoveAll(order => order.Symbol == update.Symbol);
+            _orders.AddRange(update.Orders);
+        }
+        if (updates.Count > 0)
             PublishOrders();
-            _dirty = true;
-        });
     }
 
-    private void OnProvider(VisualHFT.Model.Provider? provider)
+    private void ApplyLatestTrade(TradePrint? trade)
     {
-        if (provider == null || string.IsNullOrEmpty(provider.ProviderName))
+        if (trade == null)
             return;
-        Dispatcher.UIThread.Post(() =>
-        {
-            if (!Providers.Contains(provider.ProviderName))
-                Providers.Add(provider.ProviderName);
-            var row = Sessions.FirstOrDefault(session => session.Code == provider.ProviderCode);
-            if (row == null)
-            {
-                row = new ProviderSessionRow(provider.ProviderCode);
-                Sessions.Add(row);
-            }
-            row.Apply(provider.ProviderName, provider.Status, provider.Tooltip, provider.Plugin);
-            RefreshSessionChrome();
-        });
+        var print = trade.Value;
+        var focus = FocusedWatch();
+        var name = focus == null ? print.Provider + " " + print.Symbol : focus.Venue + " " + focus.Native;
+        LastTradeText = name + "  " + print.Price.ToString("0.########", CultureInfo.InvariantCulture)
+            + " × " + print.Size.ToString("0.####", CultureInfo.InvariantCulture);
+        LastTradeBrush = print.IsBuy == false ? Brushes.IndianRed : Brushes.MediumSeaGreen;
     }
 
     private void Flush()
     {
-        if (!_dirty)
+        var batch = _ingress.Drain();
+        if (!batch.HasWork && !_dirty)
         {
             foreach (var plugin in Plugins)
                 plugin.Refresh();
             return;
         }
 
-        List<BookSnapshot> books;
+        _dirty = false;
+        foreach (var study in Studies)
+            study.PublishPending();
+        _visibleTrades = batch.Trades;
+        ApplyNotifications(batch.Notifications);
+        ApplyProviders(batch.Providers);
+        ApplyPositions(batch.Positions);
+
+        var books = batch.Books;
         Dictionary<string, List<double>> history;
         lock (_gate)
-        {
-            _dirty = false;
-            books = _books.Values.ToList();
             history = _midHistory.ToDictionary(p => p.Key, p => p.Value.ToList());
-        }
 
         if (!string.IsNullOrEmpty(_focusNative) && !Symbols.Contains(_focusNative))
             Symbols.Add(_focusNative);
@@ -684,6 +671,7 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
                 ClearMarket(null);
             _marketIdle = true;
             PublishTape();
+            ApplyLatestTrade(batch.LatestTrade);
             PriceFrame = _prices.Frame();
             PublishFlow();
             return;
@@ -697,6 +685,7 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
             ClearMarket(focus);
             _marketIdle = true;
             PublishTape();
+            ApplyLatestTrade(batch.LatestTrade);
             PriceFrame = _prices.Frame();
             PublishFlow();
             return;
@@ -776,6 +765,7 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
             plugin.Refresh();
         PublishFlow();
         PublishReport();
+        ApplyLatestTrade(batch.LatestTrade);
         PublishTape();
         PriceFrame = _prices.Frame();
     }
@@ -819,15 +809,11 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
 
     private void PublishTape()
     {
-        List<TradePrint> trades;
-        lock (_gate)
-        {
-            trades = _trades
-                .Where(trade => Matches(trade.Symbol, trade.Provider))
-                .Reverse()
-                .Take(400)
-                .ToList();
-        }
+        var trades = _visibleTrades
+            .Where(trade => Matches(trade.Symbol, trade.Provider))
+            .Reverse()
+            .Take(400)
+            .ToList();
 
         TradeTape.Clear();
         foreach (var trade in trades)
@@ -848,30 +834,6 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
             Orders.Add(row);
     }
 
-    private static OrderSnap CopyOrder(Order order)
-    {
-        var executions = (order.Executions ?? new List<Execution>())
-            .Select(execution => (execution.Price ?? 0, execution.QtyFilled ?? 0))
-            .ToList();
-        return new OrderSnap(
-            order.CreationTimeStamp,
-            order.ProviderName ?? "",
-            order.Symbol ?? "",
-            order.ClOrdId ?? "",
-            order.Quantity,
-            order.PricePlaced,
-            order.Side.ToString(),
-            OrderBlotter.FillPercent(order.FilledQuantity, order.Quantity),
-            order.FilledQuantity,
-            OrderBlotter.AverageFill(order.FilledPrice, executions),
-            order.TimeInForce.ToString(),
-            order.OrderType.ToString(),
-            order.Status.ToString(),
-            order.BestBid,
-            order.BestAsk,
-            order.Status);
-    }
-
     public void RetargetStudies()
     {
         var focus = FocusedWatch();
@@ -884,7 +846,7 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
     {
         if (!HasTickerFocus || string.IsNullOrEmpty(symbol) || string.IsNullOrEmpty(providerName))
             return;
-        if (!StudyFollow.TryResolveConnector(DesktopPluginManager.AllPlugins, providerName, out var providerId, out var resolvedName))
+        if (!StudyFollow.TryResolveConnector(HostPlugins.AllPlugins, providerName, out var providerId, out var resolvedName))
             return;
 
         foreach (var row in Studies)
@@ -993,9 +955,7 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
 
     private void PublishReport()
     {
-        List<TradePrint> trades;
-        lock (_gate)
-            trades = _trades.Where(t => Matches(t.Symbol, t.Provider)).ToList();
+        var trades = _visibleTrades.Where(t => Matches(t.Symbol, t.Provider)).ToList();
         var report = SessionAnalytics.From(_equity.ToList(), trades, _positionSnaps.Values.ToList());
         ReportText = report.Text() + "\nLive-session ratios use equity steps, not closed-trade AnalyticReports.";
         EquitySeries = _equity.Count < 2
@@ -1058,7 +1018,7 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
         var json = SettingsManager.Instance.GetAllSettings();
         _settingsRoot = SettingsTree.Parse(string.IsNullOrWhiteSpace(json) ? "{}" : json);
         var hints = new Dictionary<string, SettingsPluginHint>(StringComparer.Ordinal);
-        foreach (var plugin in DesktopPluginManager.AllPlugins)
+        foreach (var plugin in HostPlugins.AllPlugins)
         {
             hints[plugin.GetPluginUniqueID()] = new SettingsPluginHint
             {
@@ -1324,17 +1284,14 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
         _flow.Clear();
         _prices.Clear();
         _spreads.Clear();
+        _ingress.Clear(resetTape);
         lock (_gate)
         {
-            if (resetTape)
-            {
-                _trades.Clear();
-                _books.Clear();
-                _orders.Clear();
-            }
             _midHistory.Clear();
             _midStamp.Clear();
         }
+        if (resetTape)
+            _orders.Clear();
         if (resetTape)
         {
             TradeTape.Clear();
@@ -1351,7 +1308,7 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
     private void BindTickerSearch()
     {
         _exchangePlugins.Clear();
-        foreach (var plugin in DesktopPluginManager.AllPlugins.Where(p => p.PluginType == ePluginType.MARKET_CONNECTOR).OrderBy(TickerSearch.VenueName))
+        foreach (var plugin in HostPlugins.AllPlugins.Where(p => p.PluginType == ePluginType.MARKET_CONNECTOR).OrderBy(TickerSearch.VenueName))
         {
             var venue = TickerSearch.VenueName(plugin);
             if (string.IsNullOrEmpty(venue))
@@ -1499,9 +1456,9 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
                     TickerStatus = "Subscribing to " + row.Native + " on " + row.Venue + "…";
             });
             if (running)
-                await DesktopPluginManager.RestartPluginAsync(plugin);
+                await HostPlugins.RestartPluginAsync(plugin);
             else
-                await DesktopPluginManager.StartPluginAsync(plugin);
+                await HostPlugins.StartPluginAsync(plugin);
         }
 
         await Dispatcher.UIThread.InvokeAsync(() =>
@@ -1521,36 +1478,22 @@ public sealed class TerminalViewModel : ObservableObject, IDisposable
 
     private async Task StopOtherConnectorsAsync(string keepVenue)
     {
-        foreach (var plugin in DesktopPluginManager.AllPlugins)
+        foreach (var plugin in HostPlugins.AllPlugins)
         {
             if (plugin.PluginType != ePluginType.MARKET_CONNECTOR)
                 continue;
             if (string.Equals(TickerSearch.VenueName(plugin), keepVenue, StringComparison.OrdinalIgnoreCase))
                 continue;
             if (plugin.Status is ePluginStatus.STARTED or ePluginStatus.STARTING)
-                await DesktopPluginManager.StopPluginAsync(plugin);
+                await HostPlugins.StopPluginAsync(plugin);
         }
     }
 
-    private string? LiveSymbol(WatchItemRow row)
-    {
-        lock (_gate)
-        {
-            return _books.Values.FirstOrDefault(book =>
-                TickerSearch.SameInstrument(book.Symbol, row.Native, row.Normalized)
-                && string.Equals(book.Provider, row.Venue, StringComparison.OrdinalIgnoreCase))?.Symbol;
-        }
-    }
+    private string? LiveSymbol(WatchItemRow row) =>
+        _ingress.LiveSymbol(row.Native, row.Normalized, row.Venue);
 
-    private bool HasLiveBook(WatchItemRow row)
-    {
-        lock (_gate)
-        {
-            return _books.Values.Any(book =>
-                TickerSearch.SameInstrument(book.Symbol, row.Native, row.Normalized)
-                && string.Equals(book.Provider, row.Venue, StringComparison.OrdinalIgnoreCase));
-        }
-    }
+    private bool HasLiveBook(WatchItemRow row) =>
+        _ingress.HasLiveBook(row.Native, row.Normalized, row.Venue);
 
     public void RemoveWatch(WatchItemRow row)
     {
@@ -1817,6 +1760,10 @@ public sealed class StudyRow : ObservableObject
     private readonly TerminalViewModel _desk;
     private readonly List<double> _history = new();
     private readonly List<double> _mids = new();
+    private readonly object _paint = new();
+    private string _pendingText = "";
+    private double _pendingValue;
+    private bool _pending;
     private string _valueText = "—";
     private IBrush _valueBrush = Brushes.White;
 
@@ -1858,16 +1805,34 @@ public sealed class StudyRow : ObservableObject
                     _mids.RemoveAt(0);
                 }
             }
-            Dispatcher.UIThread.Post(() =>
+            lock (_paint)
             {
-                if (!_desk.HasTickerFocus)
-                    return;
-                ValueText = text;
-                ValueBrush = double.IsNaN(value) || value == 0
-                    ? Brushes.White
-                    : value > 0 ? Brushes.MediumSeaGreen : Brushes.IndianRed;
-            });
+                _pendingText = text;
+                _pendingValue = value;
+                _pending = true;
+            }
+            _desk.MarkDirty();
         };
+    }
+
+    internal void PublishPending()
+    {
+        string text;
+        double value;
+        lock (_paint)
+        {
+            if (!_pending)
+                return;
+            _pending = false;
+            text = _pendingText;
+            value = _pendingValue;
+        }
+        if (!_desk.HasTickerFocus)
+            return;
+        ValueText = text;
+        ValueBrush = double.IsNaN(value) || value == 0
+            ? Brushes.White
+            : value > 0 ? Brushes.MediumSeaGreen : Brushes.IndianRed;
     }
 
     public void ResetDisplay()
@@ -1877,6 +1842,8 @@ public sealed class StudyRow : ObservableObject
             _history.Clear();
             _mids.Clear();
         }
+        lock (_paint)
+            _pending = false;
         ValueText = "—";
         ValueBrush = Brushes.White;
         Context = "";
@@ -1929,8 +1896,8 @@ public sealed class PluginRow : ObservableObject
     {
         Plugin = plugin;
         _owner = owner;
-        StartCommand = new RelayCommand<object>(_ => DesktopPluginManager.StartPlugin(Plugin));
-        StopCommand = new RelayCommand<object>(_ => DesktopPluginManager.StopPlugin(Plugin));
+        StartCommand = new RelayCommand<object>(_ => HostPlugins.StartPlugin(Plugin));
+        StopCommand = new RelayCommand<object>(_ => HostPlugins.StopPlugin(Plugin));
         Refresh();
     }
 

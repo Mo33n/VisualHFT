@@ -8,6 +8,7 @@ using VisualHFT.Commons.Studies;
 using VisualHFT.Desktop.Hosting;
 using VisualHFT.Model;
 using VisualHFT.PluginManager;
+using HostPlugins = VisualHFT.PluginManager.PluginManager;
 using VisualHFT.UserSettings;
 
 namespace VisualHFT.Desktop.Views;
@@ -104,7 +105,7 @@ public sealed class PluginSettingsWindow : Window
             }
 
             _status.Text = "Restarting plugin…";
-            await DesktopPluginManager.RestartPluginAsync(_plugin);
+            await HostPlugins.RestartPluginAsync(_plugin);
             _status.Text = "Saved. Plugin restarted.";
         }
         catch (Exception ex)

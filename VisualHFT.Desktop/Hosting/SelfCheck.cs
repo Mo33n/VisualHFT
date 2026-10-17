@@ -1,6 +1,7 @@
 using VisualHFT.Commons.Helpers;
 using VisualHFT.Desktop.Hosting;
 using VisualHFT.PluginManager;
+using HostPlugins = VisualHFT.PluginManager.PluginManager;
 using VisualHFT.TriggerEngine;
 
 namespace VisualHFT.Desktop;
@@ -16,12 +17,12 @@ internal static class SelfCheck
             log4net.Config.XmlConfigurator.Configure(new FileInfo(config));
 
         LicenseManager.Instance.LoadFromKeygen();
-        DesktopPluginManager.LoadPlugins();
-        var plugins = DesktopPluginManager.AllPlugins;
+        HostPlugins.LoadPlugins();
+        var plugins = HostPlugins.AllPlugins;
         foreach (var plugin in plugins.OrderBy(p => p.Name))
             Console.WriteLine($"{plugin.PluginType,-16} {plugin.Status,-16} {plugin.Name}");
 
-        var studies = DesktopPluginManager.GetSelectableStudies();
+        var studies = HostPlugins.GetSelectableStudies();
         Console.WriteLine($"plugins={plugins.Count} selectableStudies={studies.Count}");
 
         TriggerEngineService.LoadAllRules();

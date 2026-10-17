@@ -2,6 +2,8 @@ using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using VisualHFT.Desktop.Hosting;
+using VisualHFT.PluginManager;
+using HostPlugins = VisualHFT.PluginManager.PluginManager;
 using VisualHFT.Desktop.ViewModels;
 using VisualHFT.Desktop.Views;
 
@@ -25,7 +27,7 @@ public partial class App : Application
             desktop.ShutdownRequested += (_, _) =>
             {
                 _terminal.Dispose();
-                DesktopPluginManager.UnloadPlugins();
+                HostPlugins.UnloadPlugins();
             };
             desktop.MainWindow.Opened += async (_, _) =>
             {
